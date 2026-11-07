@@ -5,6 +5,10 @@ on:
   push:
     branches: [aera-16.0]
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   build:
     runs-on: ubuntu-24.04
@@ -55,6 +59,10 @@ jobs:
           repo init -u "$MANIFEST_URL" -b "$MANIFEST_BRANCH" --depth=1
           repo sync -c --force-sync --no-clone-bundle --no-tags -j4
           echo "After sync:"; df -h /; du -sh .repo 2>/dev/null || true
+          # The checked-out trees are all the build needs; drop the git object
+          # stores to free ~16 GiB for out/ and swap.
+          rm -rf .repo/project-objects .repo/projects .repo/manifests.git || true
+          echo "After pruning .repo:"; df -h /
 
       - name: Place courbet device tree
         run: |
@@ -64,13 +72,22 @@ jobs:
           rm -rf "$GITHUB_WORKSPACE/AERA_16.0/device/xiaomi/courbet/.git"
           ls -la "$GITHUB_WORKSPACE/AERA_16.0/device/xiaomi/courbet"
 
+      - name: Set up swap
+        run: |
+          sudo fallocate -l 16G /swapfile || sudo dd if=/dev/zero of=/swapfile bs=1M count=16384
+          sudo chmod 600 /swapfile
+          sudo mkswap /swapfile
+          sudo swapon /swapfile
+          echo "=== memory ==="; free -h
+          echo "=== disk ==="; df -h /
+
       - name: Build recoveryimage
         run: |
           cd "$GITHUB_WORKSPACE/AERA_16.0"
           export AERA_BUILD_DEVICE="$DEVICE"
           source build/envsetup.sh
           lunch twrp_${DEVICE}-bp2a-eng
-          mka adbd recoveryimage 2>&1 | tee "$GITHUB_WORKSPACE/build.log"
+          mka -j3 adbd recoveryimage 2>&1 | tee "$GITHUB_WORKSPACE/build.log"
         continue-on-error: true
 
       - name: Collect output
