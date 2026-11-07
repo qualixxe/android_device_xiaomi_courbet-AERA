@@ -74,11 +74,15 @@ jobs:
 
       - name: Set up swap
         run: |
-          sudo fallocate -l 16G /swapfile || sudo dd if=/dev/zero of=/swapfile bs=1M count=16384
-          sudo chmod 600 /swapfile
-          sudo mkswap /swapfile
-          sudo swapon /swapfile
-          echo "=== memory ==="; free -h
+          echo "=== memory before ==="; free -h; swapon --show || true
+          SWAP=/swapfile-build
+          sudo swapoff "$SWAP" 2>/dev/null || true
+          sudo rm -f "$SWAP"
+          sudo fallocate -l 16G "$SWAP" || sudo dd if=/dev/zero of="$SWAP" bs=1M count=16384
+          sudo chmod 600 "$SWAP"
+          sudo mkswap "$SWAP"
+          sudo swapon "$SWAP"
+          echo "=== memory after ==="; free -h; swapon --show
           echo "=== disk ==="; df -h /
 
       - name: Build recoveryimage
