@@ -34,7 +34,7 @@ git clone -b aera-16.0 \
   https://github.com/qualixxe/android_device_xiaomi_courbet-AERA.git \
   device/xiaomi/courbet
 source build/envsetup.sh
-lunch twrp_courbet-bp2a-eng
+lunch twrp_courbet-eng
 mka adbd recoveryimage
 ```
 
