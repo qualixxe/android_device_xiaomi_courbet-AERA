@@ -90,7 +90,7 @@ jobs:
           cd "$GITHUB_WORKSPACE/AERA_16.0"
           export AERA_BUILD_DEVICE="$DEVICE"
           source build/envsetup.sh
-          lunch twrp_${DEVICE}-eng
+          lunch aera_${DEVICE}-eng
           mka -j3 adbd recoveryimage 2>&1 | tee "$GITHUB_WORKSPACE/build.log"
         continue-on-error: true
 
