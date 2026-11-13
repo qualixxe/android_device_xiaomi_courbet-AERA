@@ -88,10 +88,18 @@ jobs:
       - name: Build recoveryimage
         run: |
           cd "$GITHUB_WORKSPACE/AERA_16.0"
+          # GitHub runner VMs ship systemd-oomd, which SIGTERMs the runner
+          # service as soon as memory pressure spikes during the soong
+          # analysis stage. Every build so far died right after soong_build
+          # with "runner received a shutdown signal" (exit 143). Disable it
+          # so a heavy analysis phase degrades to slow swapping instead of
+          # killing the whole job.
+          sudo systemctl disable --now systemd-oomd 2>/dev/null || true
+          sudo systemctl mask systemd-oomd 2>/dev/null || true
           export AERA_BUILD_DEVICE="$DEVICE"
           source build/envsetup.sh
-          lunch aera_${DEVICE}-eng
-          mka -j3 adbd recoveryimage 2>&1 | tee "$GITHUB_WORKSPACE/build.log"
+          lunch twrp_${DEVICE}-bp2a-eng
+          mka -j2 adbd recoveryimage 2>&1 | tee "$GITHUB_WORKSPACE/build.log"
         continue-on-error: true
 
       - name: Collect output
