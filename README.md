@@ -14,8 +14,8 @@ your stock recovery (and a restore zip) before flashing anything.
 ## Status
 
 - **Build:** GitHub Actions (`.github/workflows/build.yml`) on Ubuntu 24.04.
-- **Display:** modern Adreno 618 DRM/KMS path; the legacy KGSL backend used by
-  older Qualcomm targets is intentionally not enabled.
+- **Display:** Adreno 618; the correct framebuffer/DRM/KGSL backend still
+  requires on-device verification. No display backend has been validated.
 - **Encryption:** Qualcomm FBE helpers enabled (`qcom_decrypt`,
   `qcom_decrypt_fbe`) for the metadata-encrypted userdata. Decryption is
   unverified and may need matching keymaster blobs at runtime.
@@ -61,11 +61,26 @@ workflow artifacts.
 
 ## Partition layout
 
-A/B device with a dynamic `super` partition (group
+Non-A/B device with a dynamic `super` partition (group
 `xiaomi_dynamic_partitions`: system, system_ext, vendor, product, odm,
 mi_ext) and a dedicated `recovery` partition. `boot` / `recovery` are
-128 MiB, `dtbo` is 32 MiB. Userdata is metadata-encrypted FBE using Qualcomm
-inline crypto (ICE).
+128 MiB, `dtbo` is 32 MiB according to the inherited tree (sizes still need
+independent verification before flashing). Userdata uses F2FS, FBE policy v2,
+wrappedkey_v0 and metadata encryption. These flags agree with the courbet
+Android 16 vendor fstab; successful decryption is not established.
+
+## CI diagnostics
+
+The previous run ended after a hosted-runner shutdown signal (exit 143),
+not an identified compiler error. The workflow now caps Go heap pressure,
+limits compilation parallelism, records memory/disk telemetry and exports
+the resolved source manifest. This is a mitigation and diagnostic change,
+not proof that the shutdown cause has been fixed. Build failures are no longer
+hidden by `continue-on-error`, and images must pass a basic header/size check.
+
+No phone is flashed or unlocked by this workflow. Back up your existing
+recovery before any later testing. Never format userdata to work around
+an unverified decryption failure.
 
 ## Credits
 

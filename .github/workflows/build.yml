@@ -13,13 +13,20 @@ jobs:
   build:
     runs-on: ubuntu-24.04
     timeout-minutes: 350
+    permissions:
+      contents: read
+    defaults:
+      run:
+        shell: bash
     env:
       DEVICE: courbet
       MANIFEST_URL: https://github.com/AERA-Recovery/android_manifest.git
       MANIFEST_BRANCH: aera-16.0
-      # Runner debug logs surface the hosted-runner resource monitor's reason
-      # (excessive mem use / high CPU) in the job log.
-      ACTIONS_RUNNER_DEBUG: true
+      # Reduce peak Go heap during the Soong graph-generation phase.
+      # This is a mitigation, not a confirmed diagnosis of the old runner shutdown.
+      GOGC: "40"
+      GOMEMLIMIT: 8GiB
+      GOMAXPROCS: "2"
     steps:
       - name: Checkout device tree
         uses: actions/checkout@v4
@@ -59,8 +66,9 @@ jobs:
         run: |
           mkdir -p "$GITHUB_WORKSPACE/AERA_16.0"
           cd "$GITHUB_WORKSPACE/AERA_16.0"
-          repo init -u "$MANIFEST_URL" -b "$MANIFEST_BRANCH" --depth=1
+          repo init -u "$MANIFEST_URL" -b "$MANIFEST_BRANCH" --depth=1 --no-clone-bundle
           repo sync -c --force-sync --no-clone-bundle --no-tags -j4
+          repo manifest -r -o "$GITHUB_WORKSPACE/source-manifest.xml"
           echo "After sync:"; df -h /; du -sh .repo 2>/dev/null || true
           # The checked-out trees are all the build needs; drop the git object
           # stores to free ~16 GiB for out/ and swap.
@@ -89,26 +97,31 @@ jobs:
           echo "=== disk ==="; df -h /
 
       - name: Build recoveryimage
+        id: compile
         run: |
+          set -eo pipefail
           cd "$GITHUB_WORKSPACE/AERA_16.0"
-          # Hosted runners run an internal resource monitor that cancels the
-          # job ("runner received a shutdown signal", exit 143) when free RAM
-          # bottoms out. soong analysis reads ~60 GiB of sources, the page
-          # cache fills all RAM even though nothing is out of memory, and the
-          # monitor kills the runner. Periodically drop the caches so the
-          # monitor sees free RAM again.
-          ( while true; do
-              sync
-              sudo sh -c 'echo 3 > /proc/sys/vm/drop_caches' 2>/dev/null || true
-              sleep 45
-            done ) &
-          sudo systemctl disable --now systemd-oomd 2>/dev/null || true
-          sudo systemctl mask systemd-oomd 2>/dev/null || true
           export AERA_BUILD_DEVICE="$DEVICE"
-          source build/envsetup.sh
-          lunch twrp_${DEVICE}-bp2a-eng
-          mka -j2 adbd recoveryimage 2>&1 | tee "$GITHUB_WORKSPACE/build.log"
-        continue-on-error: true
+          # Retain diagnostics for runner stalls and memory/disk pressure.
+          (
+            while sleep 60; do
+              date -u
+              free -h
+              df -h /
+              ps -eo pid,comm,rss,%cpu --sort=-rss | head -n 12 || true
+            done
+          ) >> "$GITHUB_WORKSPACE/resources.log" 2>&1 &
+          MONITOR_PID=$!
+          trap 'kill "$MONITOR_PID" 2>/dev/null || true' EXIT
+          {
+            source build/envsetup.sh
+            lunch twrp_${DEVICE}-bp2a-eng
+            mka -j2 adbd recoveryimage
+          } 2>&1 | tee "$GITHUB_WORKSPACE/build.log"
+          # Never report a successful build without an actual image.
+          test -s "out/target/product/$DEVICE/recovery.img"
+          python3 "$GITHUB_WORKSPACE/device-tree/tools/check_image.py" \
+            "out/target/product/$DEVICE/recovery.img"
 
       - name: Collect output
         if: always()
@@ -120,6 +133,7 @@ jobs:
           cp "$OUT"/*.img "$GITHUB_WORKSPACE/artifact/" 2>/dev/null || true
           cp "$OUT"/*.zip "$GITHUB_WORKSPACE/artifact/" 2>/dev/null || true
           cp "$OUT"/recovery.img "$GITHUB_WORKSPACE/artifact/" 2>/dev/null || true
+          (cd "$GITHUB_WORKSPACE/artifact"; sha256sum ./*.img > SHA256SUMS 2>/dev/null) || true
           tail -n 200 "$GITHUB_WORKSPACE/build.log" > "$GITHUB_WORKSPACE/artifact/build-tail.log" 2>/dev/null || true
           ls -la "$GITHUB_WORKSPACE/artifact"
 
@@ -131,19 +145,23 @@ jobs:
           path: |
             build.log
             artifact/build-tail.log
+            resources.log
+            source-manifest.xml
           compression-level: 9
 
       - name: Upload recovery image
-        if: always()
+        if: always() && steps.compile.outcome == 'success'
         uses: actions/upload-artifact@v4
         with:
           name: AERA-courbet-image
-          path: artifact/*.img
+          path: |
+            artifact/*.img
+            artifact/SHA256SUMS
           if-no-files-found: warn
           compression-level: 6
 
       - name: Upload flashable zip
-        if: always()
+        if: always() && steps.compile.outcome == 'success'
         uses: actions/upload-artifact@v4
         with:
           name: AERA-courbet-zip
