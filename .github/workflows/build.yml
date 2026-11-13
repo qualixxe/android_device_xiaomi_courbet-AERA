@@ -17,6 +17,9 @@ jobs:
       DEVICE: courbet
       MANIFEST_URL: https://github.com/AERA-Recovery/android_manifest.git
       MANIFEST_BRANCH: aera-16.0
+      # Runner debug logs surface the hosted-runner resource monitor's reason
+      # (excessive mem use / high CPU) in the job log.
+      ACTIONS_RUNNER_DEBUG: true
     steps:
       - name: Checkout device tree
         uses: actions/checkout@v4
@@ -88,12 +91,17 @@ jobs:
       - name: Build recoveryimage
         run: |
           cd "$GITHUB_WORKSPACE/AERA_16.0"
-          # GitHub runner VMs ship systemd-oomd, which SIGTERMs the runner
-          # service as soon as memory pressure spikes during the soong
-          # analysis stage. Every build so far died right after soong_build
-          # with "runner received a shutdown signal" (exit 143). Disable it
-          # so a heavy analysis phase degrades to slow swapping instead of
-          # killing the whole job.
+          # Hosted runners run an internal resource monitor that cancels the
+          # job ("runner received a shutdown signal", exit 143) when free RAM
+          # bottoms out. soong analysis reads ~60 GiB of sources, the page
+          # cache fills all RAM even though nothing is out of memory, and the
+          # monitor kills the runner. Periodically drop the caches so the
+          # monitor sees free RAM again.
+          ( while true; do
+              sync
+              sudo sh -c 'echo 3 > /proc/sys/vm/drop_caches' 2>/dev/null || true
+              sleep 45
+            done ) &
           sudo systemctl disable --now systemd-oomd 2>/dev/null || true
           sudo systemctl mask systemd-oomd 2>/dev/null || true
           export AERA_BUILD_DEVICE="$DEVICE"
