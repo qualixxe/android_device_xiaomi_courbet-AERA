@@ -27,6 +27,12 @@ jobs:
       GOGC: "40"
       GOMEMLIMIT: 8GiB
       GOMAXPROCS: "2"
+      # Hosted runners run an internal resource monitor that cancels the job
+      # ("runner received a shutdown signal", exit 143) when free RAM bottoms
+      # out. soong analysis reads tens of GiB of sources, the page cache fills
+      # all RAM even though nothing is out of memory, and the monitor kills
+      # the runner. These logs make its verdict visible in the job log.
+      ACTIONS_RUNNER_DEBUG: true
     steps:
       - name: Checkout device tree
         uses: actions/checkout@v4
@@ -62,16 +68,30 @@ jobs:
           git config --global user.email "qualixxe@users.noreply.github.com"
           git config --global color.ui false
 
-      - name: Sync AERA source
+      - name: Sync AERA source (partial, recovery-only)
         run: |
           mkdir -p "$GITHUB_WORKSPACE/AERA_16.0"
           cd "$GITHUB_WORKSPACE/AERA_16.0"
           repo init -u "$MANIFEST_URL" -b "$MANIFEST_BRANCH" --depth=1 --no-clone-bundle
-          repo sync -c --force-sync --no-clone-bundle --no-tags -j4
+          # The AERA manifest resolves to 412 projects; most are irrelevant
+          # for a recovery-only build, and soong analysis over the full tree
+          # exhausts the hosted runner's memory ("shutdown signal", exit 143).
+          # Sync only the curated subset listed in
+          # device-tree/.github/sync-paths.txt (~207 projects, generated from
+          # the resolved manifest so every path is valid). The modules that
+          # vanish with the dropped projects (framework, mainline apexes, ...)
+          # are tolerated at build time via ALLOW_MISSING_DEPENDENCIES=true,
+          # the same mode AOSP/TWRP thin manifests use.
+          repo list | awk '{print $1}' > "$GITHUB_WORKSPACE/all-paths.txt"
+          grep -Fx -f "$GITHUB_WORKSPACE/device-tree/.github/sync-paths.txt" \
+            "$GITHUB_WORKSPACE/all-paths.txt" > "$GITHUB_WORKSPACE/to-sync.txt" || true
+          echo "Partial sync: $(wc -l < "$GITHUB_WORKSPACE/to-sync.txt") of $(wc -l < "$GITHUB_WORKSPACE/all-paths.txt") projects"
+          xargs -a "$GITHUB_WORKSPACE/to-sync.txt" \
+            repo sync -c --force-sync --no-clone-bundle --no-tags -j4
           repo manifest -r -o "$GITHUB_WORKSPACE/source-manifest.xml"
           echo "After sync:"; df -h /; du -sh .repo 2>/dev/null || true
           # The checked-out trees are all the build needs; drop the git object
-          # stores to free ~16 GiB for out/ and swap.
+          # stores to free disk for out/ and swap.
           rm -rf .repo/project-objects .repo/projects .repo/manifests.git || true
           echo "After pruning .repo:"; df -h /
 
@@ -101,7 +121,23 @@ jobs:
         run: |
           set -eo pipefail
           cd "$GITHUB_WORKSPACE/AERA_16.0"
+          # Disable systemd-oomd: it also SIGTERMs the runner service on
+          # memory pressure instead of letting the swapfile absorb it.
+          sudo systemctl disable --now systemd-oomd 2>/dev/null || true
+          sudo systemctl mask systemd-oomd 2>/dev/null || true
+          # Periodically drop the page cache so the hosted-runner resource
+          # monitor keeps seeing free RAM while soong reads tens of GiB of
+          # sources. Without this, MemFree hits zero during soong analysis
+          # and the runner cancels the job ("shutdown signal", exit 143).
+          ( while sleep 45; do
+              sync
+              sudo sh -c 'echo 3 > /proc/sys/vm/drop_caches' 2>/dev/null || true
+            done ) >> "$GITHUB_WORKSPACE/resources.log" 2>&1 &
+          MONITOR_PID=$!
           export AERA_BUILD_DEVICE="$DEVICE"
+          # Thin-manifest mode: the partial sync omits framework/mainline
+          # projects, so missing modules and dependencies must be tolerated.
+          export ALLOW_MISSING_DEPENDENCIES=true
           # Retain diagnostics for runner stalls and memory/disk pressure.
           (
             while sleep 60; do
@@ -111,8 +147,8 @@ jobs:
               ps -eo pid,comm,rss,%cpu --sort=-rss | head -n 12 || true
             done
           ) >> "$GITHUB_WORKSPACE/resources.log" 2>&1 &
-          MONITOR_PID=$!
-          trap 'kill "$MONITOR_PID" 2>/dev/null || true' EXIT
+          WATCH_PID=$!
+          trap 'kill "$MONITOR_PID" "$WATCH_PID" 2>/dev/null || true' EXIT
           {
             source build/envsetup.sh
             lunch twrp_${DEVICE}-bp2a-eng
